@@ -138,3 +138,67 @@ Deploy notes that will matter again:
   two separate in-memory room stores — players would silently end up on different
   instances and not see each other. Keep exactly one machine until there is a shared
   store or sticky sessions.
+
+---
+
+## S04 — Round state machine
+Date: 2026-10-28
+
+**What I built**
+Server-authoritative round engine: LOBBY → PROMPT_REVEAL → DRAWING → ROUND_END →
+GAME_END. Drawer rotation skipping disconnected players, server-side guess
+validation (correct / close / wrong), speed-bonus scoring, early round end when
+every connected guesser has solved, and a 200ms ticker driving phase transitions.
+536 prompts across 18 categories, difficulty ramping by round, with a
+greatest-hits bias so strong words recur across games.
+
+**Decisions + why**
+- **Absolute `endsAt` timestamps, resolved lazily.** The ticker only controls
+  broadcast *latency* (~200ms), never correctness. A blocked event loop or a
+  paused process cannot make a round run long, and every client derives the same
+  countdown from the same number. This is the "feels fair" mechanism the blog
+  post is about.
+- **The answer is a separate message type.** `DrawerViewMessage` is sent only to
+  the drawer's own socket; `RoundView.answer` is null unless the phase reveals it.
+  Making the leak a distinct, explicitly-addressed type means a leak has to be
+  written deliberately, not fall out of a widening broadcast.
+- **Category shown to the drawer only.** Solves a drawer freezing on a blank
+  prompt without narrowing the guess space for everyone.
+- **Difficulty ramps easy → medium → hard.** Round three being hard is what stops
+  games ending flat.
+- **Hits bias (~40%).** With a uniform 536-word draw, no single word surfaces
+  often enough to tune by playtesting, and you lose the running-joke effect that
+  makes repeat sessions fun. Repeats are a feature.
+
+**What broke — and it was architectural**
+`packages/shared` exported raw TypeScript source as its entry point
+(`"main": "./src/index.ts"`). Fine when it was one file with no internal imports.
+The moment it imported `./prompts.js`, Vite's config loader hit Node's ESM
+resolver, which wants a real `.js` on disk — and there wasn't one until compiled.
+The web build then failed at *config load*, before React was involved, which made
+the error look unrelated to the change that caused it.
+
+I chased it with three wrong fixes (`.js` specifier, `.ts` specifier,
+`allowImportingTsExtensions`) before doing the right thing: compile `shared` to
+`dist/` and point `main`/`types`/`exports` at the build output. Lesson worth
+keeping: when a monorepo package is consumed by two different resolvers (Vite's
+dev server and Node's runtime), export built artifacts, not source.
+
+`npm run dev` now builds shared first, since dev servers were otherwise reading
+stale or missing output.
+
+**Verified — 24/24 protocol checks**
+Including the acceptance criterion: the answer never appears in non-drawer wire
+traffic before ROUND_END (asserted by scanning every received frame for the word).
+Also: non-host cannot start, drawer cannot guess their own word, near-miss returns
+`close` (edit distance ≤ 2), case-insensitive correctness, guess feed broadcast,
+scores awarded, all-solved ends the round early, drawer rotates between rounds,
+new answer differs.
+
+**Still missing**
+No UI for any of this yet — the round engine is only reachable by protocol. Host
+screen is S07, controller drawing/guessing is S05–S06. `soloMode` and analytics
+also unbuilt.
+
+**Next session starts with**
+S05: controller lobby, ready-up, and the pre-round screens.

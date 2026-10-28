@@ -13,6 +13,11 @@
 // Domain types
 // ---------------------------------------------------------------------------
 
+import type { Category } from './prompts.js';
+
+export type { Category, Difficulty, Prompt, PromptSelection } from './prompts.js';
+export { CATEGORIES, PROMPTS, pickPrompt, poolFor } from './prompts.js';
+
 /**
  * Which game a room plays. Only one exists today, but the field ships now so
  * adding game #2 needs no state migration (see PLAN.md).
@@ -58,6 +63,16 @@ export type LeaveRoomRequest = {
   type: 'leaveRoom';
 };
 
+/** Host starts the game. Only the host may send this. */
+export type StartGameRequest = {
+  type: 'startGame';
+};
+
+export type GuessRequest = {
+  type: 'guess';
+  text: string;
+};
+
 export type PingMessage = {
   type: 'ping';
   /** Client-side send time, echoed back so RTT can be computed. */
@@ -68,6 +83,8 @@ export type ClientMessage =
   | CreateRoomRequest
   | JoinRoomRequest
   | LeaveRoomRequest
+  | StartGameRequest
+  | GuessRequest
   | PingMessage;
 
 // ---------------------------------------------------------------------------
@@ -102,6 +119,109 @@ export type RoomLeftMessage = {
   reason: 'left' | 'closed' | 'kicked';
 };
 
+// ---------------------------------------------------------------------------
+// Round state (S04)
+// ---------------------------------------------------------------------------
+
+/**
+ * Round phases. Server-owned; clients only render.
+ *
+ * LOBBY → PROMPT_REVEAL → DRAWING → ROUND_END → (next round | GAME_END)
+ */
+export type Phase = 'LOBBY' | 'PROMPT_REVEAL' | 'DRAWING' | 'ROUND_END' | 'GAME_END';
+
+/**
+ * What a non-drawer is allowed to know about the prompt. Deliberately a
+ * separate type from the drawer view so a leak has to be typed explicitly.
+ */
+export type PromptHint = {
+  category: Category;
+  /** One entry per character; letters are revealed over time, spaces as-is. */
+  masked: string[];
+};
+
+/** Public score line. */
+export type ScoreEntry = {
+  playerId: string;
+  name: string;
+  score: number;
+};
+
+/**
+ * Round state as broadcast to the room. Never carries the answer text.
+ * The drawer learns the word through DrawerView instead.
+ */
+export type RoundView = {
+  phase: Phase;
+  roundIndex: number;
+  totalRounds: number;
+  drawerId: string | null;
+  /** Server epoch ms when the current phase ends. Clients derive countdowns. */
+  endsAt: number | null;
+  hint: PromptHint | null;
+  scores: ScoreEntry[];
+  /** Populated at ROUND_END only. */
+  answer: string | null;
+};
+
+/**
+ * Sent ONLY to the drawer's own connection, never broadcast. This is the one
+ * message that may contain the answer during DRAWING.
+ */
+export type DrawerViewMessage = {
+  type: 'drawerView';
+  answer: string;
+  category: Category;
+};
+
+export type RoundStateMessage = {
+  type: 'roundState';
+  round: RoundView;
+};
+
+export type GuessResultMessage = {
+  type: 'guessResult';
+  result: 'correct' | 'close' | 'wrong';
+  /** Echo of what the player guessed, so the client can render its own feed. */
+  text: string;
+};
+
+/** Broadcast so the guess feed is shared and the host screen can show it. */
+export type GuessFeedMessage = {
+  type: 'guessFeed';
+  playerId: string;
+  name: string;
+  text: string;
+  result: 'correct' | 'close' | 'wrong';
+};
+
+/** One stroke as broadcast. Points are in a fixed 0..1 space, not pixels. */
+export type StrokeMessage = {
+  type: 'stroke';
+  playerId: string;
+  strokeId: string;
+  color: string;
+  width: number;
+  points: Array<{ x: number; y: number }>;
+};
+
+export type SendStrokeRequest = {
+  type: 'stroke';
+  strokeId: string;
+  color: string;
+  width: number;
+  points: Array<{ x: number; y: number }>;
+};
+
+export type UndoStrokeRequest = {
+  type: 'undoStroke';
+};
+
+export type UndoStrokeMessage = {
+  type: 'undoStroke';
+  playerId: string;
+};
+
 /**
  * Error codes are stable strings so the client can map them to friendly copy
  * without parsing message text.
@@ -113,6 +233,10 @@ export type ErrorCode =
   | 'INVALID_CODE'
   | 'INVALID_NAME'
   | 'BAD_TOKEN'
+  | 'NOT_HOST'
+  | 'TOO_FEW_PLAYERS'
+  | 'WRONG_PHASE'
+  | 'NOT_DRAWER'
   | 'SERVER_ERROR';
 
 export type ErrorMessage = {
@@ -126,6 +250,12 @@ export type ServerMessage =
   | RoomJoinedMessage
   | RoomStateMessage
   | RoomLeftMessage
+  | RoundStateMessage
+  | DrawerViewMessage
+  | GuessResultMessage
+  | GuessFeedMessage
+  | StrokeMessage
+  | UndoStrokeMessage
   | ErrorMessage;
 
 // ---------------------------------------------------------------------------
@@ -159,6 +289,81 @@ export const ROOM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** A disconnected player is dropped from the room after this long. */
 export const PLAYER_DISCONNECT_GRACE_MS = 5 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Round tuning
+// ---------------------------------------------------------------------------
+
+export const ROUNDS_PER_GAME = 3;
+
+/** Drawing time in ms. */
+export const DRAWING_MS = 80_000;
+
+/** How long the drawer sees the word before drawing starts. */
+export const PROMPT_REVEAL_MS = 5_000;
+
+/** How long the answer and scores stay up between rounds. */
+export const ROUND_END_MS = 8_000;
+
+/** Points a correct guesser gets, plus up to this much speed bonus. */
+export const SCORE_BASE = 100;
+export const SCORE_SPEED_BONUS = 100;
+
+/** Points the drawer earns per player who guesses correctly. */
+export const SCORE_PER_GUESSER = 50;
+
+/**
+ * A guess within this edit distance of the answer counts as "close".
+ * Powers the SO CLOSE feedback without revealing the answer.
+ */
+export const CLOSE_EDIT_DISTANCE = 2;
+
+// ---------------------------------------------------------------------------
+// Guess normalisation
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalises a guess for comparison. Deliberately aggressive: casing,
+ * punctuation, and repeated spaces must never decide a round.
+ */
+export function normalizeGuess(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Levenshtein distance, capped early for performance on long inputs. */
+export function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  let prev = new Array<number>(b.length + 1);
+  let curr = new Array<number>(b.length + 1);
+  for (let j = 0; j <= b.length; j += 1) prev[j] = j;
+
+  for (let i = 1; i <= a.length; i += 1) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j]! + 1, curr[j - 1]! + 1, prev[j - 1]! + cost);
+    }
+    const swap = prev;
+    prev = curr;
+    curr = swap;
+  }
+  return prev[b.length]!;
+}
+
+/**
+ * Masks the answer for non-drawers. Spaces are kept visible so multi-word
+ * prompts show their shape; every other character becomes a slot.
+ */
+export function maskAnswer(answer: string): string[] {
+  return [...answer].map((ch) => (ch === ' ' ? ' ' : '_'));
+}
 
 // ---------------------------------------------------------------------------
 // Helpers (shared so client and server agree on validation)

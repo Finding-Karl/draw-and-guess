@@ -14,6 +14,17 @@ import {
   type ServerMessage,
 } from '@dg/shared';
 import {
+  allGuessersSolved,
+  clearRoom,
+  endRound,
+  forgetPlayer,
+  getRound,
+  startGame,
+  submitGuess,
+  tick,
+  toRoundView,
+} from './round.js';
+import {
   createRoom,
   getRoom,
   joinRoom,
@@ -79,6 +90,40 @@ function broadcastRoomState(code: string): void {
   }
 }
 
+/** Send an arbitrary message to every connected socket in a room. */
+function broadcast(code: string, msg: ServerMessage): void {
+  for (const client of roomSockets(code)) send(client.ws, msg);
+}
+
+/**
+ * Push round state to the room, and separately give the drawer their word.
+ *
+ * This is the leak boundary. toRoundView() omits the answer unless the phase
+ * reveals it, and drawerView is addressed only to the drawer's own sockets.
+ * If you ever need to add information here, put it in DrawerView instead of
+ * widening the broadcast.
+ */
+function broadcastRound(code: string): void {
+  const room = getRoom(code);
+  const state = getRound(code);
+  if (!room || !state) return;
+
+  const view = toRoundView(room, state);
+  for (const client of roomSockets(code)) {
+    send(client.ws, { type: 'roundState', round: view });
+
+    const isDrawer = state.drawerId !== null && client.playerId === state.drawerId;
+    const answerVisible = state.phase === 'DRAWING' || state.phase === 'PROMPT_REVEAL';
+    if (isDrawer && answerVisible && state.answer && state.category) {
+      send(client.ws, {
+        type: 'drawerView',
+        answer: state.answer,
+        category: state.category,
+      });
+    }
+  }
+}
+
 // --- validation -------------------------------------------------------------
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -131,6 +176,15 @@ export function parseClientMessage(raw: string): { ok: true; msg: ClientMessage 
     }
     case 'leaveRoom': {
       return { ok: true, msg: { type: 'leaveRoom' } };
+    }
+    case 'startGame': {
+      return { ok: true, msg: { type: 'startGame' } };
+    }
+    case 'guess': {
+      const text = asString(value['text']);
+      if (text === null) return { ok: false, code: 'SERVER_ERROR', message: 'guess.text is required' };
+      // Cap input length: guesses are short, and an unbounded string is a DoS.
+      return { ok: true, msg: { type: 'guess', text: text.slice(0, 64) } };
     }
     default:
       return { ok: false, code: 'SERVER_ERROR', message: `Unknown message type: ${String(type)}` };
@@ -238,6 +292,84 @@ function handleMessage(client: Client, raw: string): void {
       break;
     }
 
+    case 'startGame': {
+      const room = client.roomCode ? getRoom(client.roomCode) : undefined;
+      if (!room) {
+        sendError(client.ws, 'ROOM_NOT_FOUND', 'You are not in a room');
+        break;
+      }
+      const me = room.players.find((p) => p.id === client.playerId);
+      if (!me?.isHost) {
+        sendError(client.ws, 'NOT_HOST', 'Only the host can start the game');
+        break;
+      }
+
+      const result = startGame(room);
+      if (!result.ok) {
+        const message =
+          result.code === 'TOO_FEW_PLAYERS'
+            ? 'You need at least 2 players'
+            : 'That game has already started';
+        sendError(client.ws, result.code, message);
+        break;
+      }
+
+      broadcastRoomState(room.code);
+      broadcastRound(room.code);
+      console.log(`[round] ${room.code} game started`);
+      break;
+    }
+
+    case 'guess': {
+      if (!client.roomCode || !client.playerId) break;
+      const room = getRoom(client.roomCode);
+      const state = getRound(client.roomCode);
+      if (!room || !state) break;
+
+      const player = room.players.find((p) => p.id === client.playerId);
+      const outcome = submitGuess(state, client.playerId, msg.text);
+
+      switch (outcome.kind) {
+        case 'ignored': {
+          // Silent: a late guess from an already-solved player is normal.
+          break;
+        }
+        case 'correct': {
+          send(client.ws, { type: 'guessResult', result: 'correct', text: msg.text });
+          broadcast(client.roomCode, {
+            type: 'guessFeed',
+            playerId: client.playerId,
+            name: player?.name ?? 'someone',
+            text: msg.text,
+            result: 'correct',
+          });
+
+          // Round ends immediately once everyone has guessed.
+          if (allGuessersSolved(room, state)) {
+            endRound(state);
+            broadcastRound(client.roomCode);
+            console.log(`[round] ${client.roomCode} all solved, round ended early`);
+          } else {
+            broadcastRound(client.roomCode);
+          }
+          break;
+        }
+        case 'close':
+        case 'wrong': {
+          send(client.ws, { type: 'guessResult', result: outcome.kind, text: msg.text });
+          broadcast(client.roomCode, {
+            type: 'guessFeed',
+            playerId: client.playerId,
+            name: player?.name ?? 'someone',
+            text: msg.text,
+            result: outcome.kind,
+          });
+          break;
+        }
+      }
+      break;
+    }
+
     default: {
       // Exhaustiveness guard; see server/src/ws.ts history for the cast note.
       const unreachable = msg as never;
@@ -325,12 +457,38 @@ export function attachWebSocket(server: Server): WebSocketServer {
     for (const { code } of expired) broadcastRoomState(code);
 
     const removed = reapIdleRooms(ROOM_IDLE_TIMEOUT_MS);
-    for (const code of removed) console.log(`[room] ${code} idle, deleted`);
+    for (const code of removed) {
+      clearRoom(code);
+      console.log(`[room] ${code} idle, deleted`);
+    }
   }, 30_000);
+
+  /**
+   * Round clock. Runs often so phase changes land within ~200ms of their
+   * deadline; the deadlines themselves are absolute timestamps, so this
+   * interval only controls broadcast latency, never game fairness.
+   */
+  const roundTicker = setInterval(() => {
+    const now = Date.now();
+    for (const code of [...new Set([...clients.values()].map((c) => c.roomCode))]) {
+      if (!code) continue;
+      const room = getRoom(code);
+      const state = getRound(code);
+      if (!room || !state) continue;
+
+      const events = tick(room, state, now);
+      if (events.length === 0) continue;
+      for (const event of events) {
+        console.log(`[round] ${code} ${event.kind}`);
+      }
+      broadcastRound(code);
+    }
+  }, 200);
 
   wss.on('close', () => {
     clearInterval(heartbeat);
     clearInterval(reaper);
+    clearInterval(roundTicker);
   });
 
   return wss;

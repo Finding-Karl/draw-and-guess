@@ -91,7 +91,7 @@ States: LOBBY → PROMPT_REVEAL → DRAWING → ROUND_END → (next round | GAME
 
 Rules:
 - Server owns all timers. Clients render countdowns from a server-sent `endsAt` epoch timestamp plus periodic sync, never from a locally started timer.
-- Round flow: pick a drawer (rotate through players, skip disconnected), pick a prompt from a bundled list of ~60 (mix of easy/medium/hard), broadcast round start.
+- Round flow: pick a drawer (rotate through players, skip disconnected), pick a prompt from a bundled list of 500+ tagged by difficulty (easy/medium/hard), broadcast round start.
 - DRAWING lasts 80s. Server emits a tick or the client derives from endsAt (your call — document it).
 - Guesses go through the server: it compares normalized strings (lowercase, trim, collapse whitespace, strip punctuation) and answers with one of: correct | close | wrong. "close" = edit distance <= 2 vs the answer.
 - A correct guess ends the round immediately. First correct player wins the round.
@@ -230,7 +230,7 @@ Acceptance: draw the same thing on an iPhone and a laptop trackpad; the host scr
 
 ### S13 — Prompt content + pacing of a whole game
 ```
-- Expand prompts to 200+, tagged by difficulty, curated so they're drawable (concrete nouns/scenes, not abstractions). Include a `prompts.ts` with a comment on selection strategy (difficulty ramps across rounds).
+- Expand prompts to 500+, tagged by difficulty, curated so they're drawable (concrete nouns/scenes, not abstractions). Include a `prompts.ts` with a comment on selection strategy (difficulty ramps across rounds).
 - Add a post-round summary beat between rounds: who drew what, who guessed, time to solve.
 - Tune numbers: round length, points, speed bonus curve. Play 5 full games solo with 3+ tabs and write down where it drags.
 - Optional but cheap: skip-vote — if 2/3 of guessers vote skip, the round ends with no points. Prevents dead rounds.

@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n server,web -c blue,magenta \"npm:dev -w @dg/server\" \"npm:dev -w @dg/web\"",
+    "dev": "npm run build -w @dg/shared && concurrently -n server,web -c blue,magenta \"npm:dev -w @dg/server\" \"npm:dev -w @dg/web\"",
     "build": "npm run build -w @dg/shared && npm run build -w @dg/server && npm run build -w @dg/web",
     "typecheck": "npm run typecheck -w @dg/shared && npm run typecheck -w @dg/server && npm run typecheck -w @dg/web"
   },
