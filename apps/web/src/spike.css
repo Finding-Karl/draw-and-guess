@@ -1,0 +1,129 @@
+/* S03 spike styles. Scoped to .spike* classes so they cannot leak into the real UI. */
+
+.spike {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  /* Safe areas: on a notched phone the canvas must not run under the home
+     indicator, or a stroke ending there triggers a system gesture. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  background: #f3f4f6;
+  overflow: hidden;
+}
+
+.spike-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 0.875rem;
+  flex: 0 0 auto;
+}
+
+.spike-head h1 {
+  font-size: 0.9375rem;
+  margin: 0;
+}
+
+.spike-sub {
+  margin: 0.125rem 0 0;
+  font-size: 0.75rem;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
+
+.spike-canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: block;
+  width: 100%;
+  background: #fff;
+  border-top: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+
+  /* The three properties that make finger drawing possible in mobile Safari.
+     touch-action: none kills pan + pinch + double-tap zoom on the canvas.
+     user-select: none stops a slow drag becoming a text selection.
+     -webkit-touch-callout: none stops the long-press callout menu. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: crosshair;
+}
+
+.spike-tools {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.625rem 0.875rem;
+}
+
+.spike-btn {
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 0.5rem 0.875rem;
+  /* 44px minimum touch target. */
+  min-height: 44px;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #fff;
+  color: #14161a;
+  cursor: pointer;
+}
+
+.spike-swatches,
+.spike-widths {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.spike-swatches {
+  margin-left: auto;
+}
+.spike-widths {
+  margin-left: 0;
+}
+
+.swatch {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  box-shadow: 0 0 0 1px #d1d5db;
+  cursor: pointer;
+  padding: 0;
+}
+.swatch.active {
+  border-color: #14161a;
+  box-shadow: 0 0 0 2px #fff inset;
+}
+
+.width-btn {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+  padding: 0;
+}
+.width-btn.active {
+  border-color: #14161a;
+  background: #14161a;
+}
+.width-btn span {
+  display: block;
+  border-radius: 50%;
+  background: #6b7280;
+}
+.width-btn.active span {
+  background: #fff;
+}

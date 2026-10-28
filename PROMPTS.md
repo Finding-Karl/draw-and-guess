@@ -254,9 +254,116 @@ Acceptance: click landing page → play a round → finish, all without a second
 
 ---
 
-## Phase 5 — Ship the story (Sessions 15–17)
+## Phase 4b — Visual design (Sessions 15–17) — the portfolio surface
 
-### S15 — Analytics from day one (retrofit allowed, but note it)
+**Why this is its own phase.** S09–S14 make the game *feel* right — timing, reveals,
+latency, reconnection. This phase makes it *look* right. They are different skills and
+different work, and lumping them together is how side projects end up functionally
+correct and visually generic. Recruiters screenshot; a portfolio piece has to survive
+that screenshot.
+
+**Gate:** only start this once S14 is done and the whole loop is playable end to end.
+Styling a flow that still changes is wasted work.
+
+**Do this before analytics and the blog post**, because the screenshots and the demo
+recording come from this phase, and the post needs them.
+
+### S15 — Visual direction + design tokens
+```
+Establish a real visual identity before touching individual screens.
+
+- Write a short DESIGN.md (half a page max) answering: who is this for, what should it
+  feel like (3 adjectives), what is the one memorable visual element? For a party game
+  the answer is usually "playful, tactile, slightly hand-drawn" — not "clean SaaS".
+- Define design tokens in CSS custom properties: a limited color palette (1 accent,
+  1 surface, 2 neutrals, semantic success/warning/danger), a type scale (5 sizes max),
+  spacing scale (4px base), radii, and 2-3 shadow levels. Put them in one tokens file.
+- Pick the type pairing. One display face for the word reveal and scoreboard, one
+  legible UI face for everything else. Self-host via a local woff2 — no runtime font CDN
+  during a round, it causes a visible reflow on first paint of the reveal.
+- Decide the dark/light question NOW: a party game is usually played in a dim room,
+  so dark-first is defensible, but you must pick one and commit. Document the call.
+- Delete every ad-hoc color and font-size from the S02-S14 code and replace with tokens.
+  This is mechanical and boring; do it fully anyway.
+
+Acceptance: grep the codebase for hex colors and px font sizes outside the tokens file
+and find zero. DESIGN.md exists and you believe it.
+```
+
+**Exit:** one tokens file, one DESIGN.md, no stray colors in components.
+
+### S16 — Host screen: make it read from 3 meters
+```
+The host screen is the thing in every screenshot and every demo recording. Treat it as
+its own design problem, not a scaled-up phone UI.
+
+- Type scale for distance: the round timer, the room code, and the scoreboard must be
+  legible at 3m on a laptop. Test by literally standing back.
+- The canvas: give it a deliberate frame — a border or matte so it reads as a "sheet"
+  rather than floating pixels. Drawer name and word-length shown above it.
+- Layout rhythm during a round: canvas dominant, guess feed secondary, timer unmissable.
+  Nothing on this screen should move position when a new guess arrives.
+- Scoreboard: this is the shareable artifact. Design it as one. Avatars or initials,
+  a clear 1st place, and room for a "built by" line that will become the share card.
+- Empty and long states: 1 player, 8 players, 8 players at differing name lengths.
+  Handle all three.
+
+Acceptance: display it on a TV or a laptop across the room and read everything without
+leaning in. Then screenshot it and check it still looks intentional at 400px wide.
+```
+
+**Exit:** the host screen is the screenshot you'd lead the blog post with.
+
+### S17 — Controller: thumb-first craft
+```
+The controller is used with one thumb, standing up, possibly a drink in the other hand.
+- Redesign against those constraints, not as a shrunken desktop layout.
+- Touch targets: 44px minimum, 48px where the button is pressed often (undo, color,
+  guess submit). Verify with a thumb, not a mouse.
+- The drawing toolbar must never be accidentally triggered while drawing: inset it,
+  add a dead zone, or use a drag-up reveal. Document what you chose and why.
+- Guess input: the virtual keyboard must not push the layout in a way that hides the
+  guess feed. Handle the visual-viewport resize case explicitly.
+- Feedback states: correct / close / wrong need to be unmistakable at a glance and
+  reachable with haptics where supported.
+- Safe-area insets for notched phones: nothing tappable under the home indicator.
+
+Acceptance: play a full round one-handed on a real phone without a single mis-tap and
+without the keyboard hiding anything you need.
+```
+
+**Exit:** one-handed play is comfortable on a real device.
+
+### S18 — Motion, sound, and the finish pass
+```
+Final visual pass. Constraint: every animation must survive prefers-reduced-motion and
+must be interruptible without state desync.
+
+- Motion language: define 3 durations (fast/standard/emphatic) and 1-2 easing curves in
+  the tokens file, then use nothing else. Inconsistent timing is the tell of a prototype.
+- The word reveal: this is the signature moment. Give it real character — a stamp, a
+  deal, a flip. It should be the thing people describe when telling a friend about the
+  game.
+- Guess feed entries animate in without shifting layout; correct guesses get a distinct
+  treatment.
+- Empty states: no players yet, everyone waiting, round about to start. These get seen
+  constantly in a real game and are usually skipped.
+- Favicon, page title per screen, OG image. The OG image is what shows up when someone
+  pastes the link in Discord — design it, don't autogenerate a screenshot.
+- Dark mode (if that was the S15 call) verified on both surfaces.
+
+Acceptance: record a 60s capture. Show it to one person who hasn't seen the game and ask
+what they think it is. If they can't tell it's a party game from the visuals alone,
+keep going.
+```
+
+**Exit:** the recording is portfolio-ready before a single line of the blog post exists.
+
+---
+
+## Phase 5 — Ship the story (Sessions 19–21)
+
+### S19 — Analytics from day one (retrofit allowed, but note it)
 ```
 Add minimal, privacy-respecting analytics. No cookies, no third-party trackers if avoidable — server-side event logging into a JSON file or a free tier of a hosted store is fine.
 

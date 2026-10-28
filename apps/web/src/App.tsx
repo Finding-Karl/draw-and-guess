@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import Home from './Home';
 import Room from './Room';
+import SpikeDraw from './SpikeDraw';
 import { useSocket } from './socket';
 import { parseRoomParam } from './qr';
+import './spike.css';
 
 /**
  * Routing without a router library.
@@ -19,7 +21,8 @@ import { parseRoomParam } from './qr';
 type Route =
   | { name: 'home'; roomParam: string | null }
   | { name: 'room'; code: string }
-  | { name: 'play'; code: string };
+  | { name: 'play'; code: string }
+  | { name: 'spike' };
 
 function parsePath(pathname: string): Route {
   const roomParam = parseRoomParam(new URLSearchParams(location.search).get('room'));
@@ -30,6 +33,9 @@ function parsePath(pathname: string): Route {
   }
   if (parts.length === 2 && parts[0] === 'play') {
     return { name: 'play', code: (parts[1] ?? '').toUpperCase() };
+  }
+  if (parts.length === 1 && parts[0] === 'spike') {
+    return { name: 'spike' };
   }
   return { name: 'home', roomParam };
 }
@@ -64,7 +70,9 @@ export default function App() {
   // Direct navigation to /room/CODE or /play/CODE without a session: attempt
   // to resume using a stored token, otherwise bounce to the join form.
   useEffect(() => {
-    if (route.name === 'home' || socket.room) return;
+    // Any route without a `code` field (home, spike) is not a room resume.
+    if (route.name !== 'room' && route.name !== 'play') return;
+    if (socket.room) return;
     if (socket.state === 'offline') return;
 
     const code = route.code;
@@ -80,6 +88,12 @@ export default function App() {
     socket.leaveRoom();
     navigate('/');
   };
+
+  // The spike is standalone: no socket, no room. Kept above the room logic so
+  // it renders even when the server is unreachable (that's the point of a spike).
+  if (route.name === 'spike') {
+    return <SpikeDraw />;
+  }
 
   let body: React.ReactNode;
   if (socket.room && route.name !== 'home') {
