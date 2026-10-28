@@ -108,6 +108,11 @@ export type RoomJoinedMessage = {
   playerId: string;
   token: string;
   room: RoomView;
+  /**
+   * True when this connection is the room's display rather than a player.
+   * A host has no seat: it never draws and never appears in the scoreboard.
+   */
+  isHost: boolean;
 };
 
 /** Broadcast to everyone whenever membership changes. */
