@@ -1,82 +1,267 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { IncomingMessage, Server } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import {
   DEFAULT_SERVER_PORT,
+  MAX_NAME_LENGTH,
+  PLAYER_DISCONNECT_GRACE_MS,
   PING_INTERVAL_MS,
+  ROOM_IDLE_TIMEOUT_MS,
   WS_PATH,
+  normalizeRoomCode,
   type ClientMessage,
+  type ErrorCode,
   type ServerMessage,
 } from '@dg/shared';
+import {
+  createRoom,
+  getRoom,
+  joinRoom,
+  markDisconnected,
+  reapExpiredPlayers,
+  reapIdleRooms,
+  removePlayer,
+  toRoomView,
+} from './rooms.js';
 
 /**
- * WebSocket transport layer.
+ * WebSocket transport + room membership messaging.
  *
- * S01 scope: prove that a typed bidirectional channel works, that latency can be
- * measured, and that disconnects are visible. No rooms, no game state, no auth.
+ * Responsibilities, in order of importance:
+ * 1. parse and validate every inbound frame without ever crashing the process
+ * 2. own the mapping between sockets and (room, player)
+ * 3. broadcast room state when membership changes
  *
- * Design:
- * - One shared JSON envelope. Every frame is parsed defensively: a malformed
- *   frame closes only that connection, never the server.
- * - Connections are tracked in a Set so shutdown can close them cleanly.
- * - Nothing here knows about the game. Keep it that way; room logic lands in
- *   S02 as a separate module that this file delegates to.
+ * The rule that keeps this simple: the socket is the connection, the player
+ * token is the identity. A socket dying never deletes a player; only an
+ * explicit leave or the grace period does.
  */
 
 type Client = {
   ws: WebSocket;
-  id: string;
+  /** Stable per-connection id. Distinct from the player id. */
+  connId: string;
   alive: boolean;
+  /** Set once the connection is bound to a seat. */
+  roomCode: string | null;
+  playerId: string | null;
 };
 
 const clients = new Map<WebSocket, Client>();
-let nextId = 1;
+
+// --- send helpers -----------------------------------------------------------
 
 function send(ws: WebSocket, msg: ServerMessage): void {
   if (ws.readyState !== ws.OPEN) return;
   ws.send(JSON.stringify(msg));
 }
 
-function isClientMessage(value: unknown): value is ClientMessage {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'type' in value &&
-    (value as { type: unknown }).type === 'ping'
-  );
+function sendError(ws: WebSocket, code: ErrorCode, message: string): void {
+  send(ws, { type: 'error', code, message });
+}
+
+/** Everyone currently connected in a room. */
+function roomSockets(code: string): Client[] {
+  const out: Client[] = [];
+  for (const client of clients.values()) {
+    if (client.roomCode === code) out.push(client);
+  }
+  return out;
+}
+
+/** Push the current room view to everyone in it. */
+function broadcastRoomState(code: string): void {
+  const room = getRoom(code);
+  if (!room) return;
+  const view = toRoomView(room);
+  for (const client of roomSockets(code)) {
+    send(client.ws, { type: 'roomState', room: view });
+  }
+}
+
+// --- validation -------------------------------------------------------------
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+/**
+ * Parses an inbound frame into a ClientMessage, or returns a specific error.
+ * Kept separate from handling so the handlers never see `unknown`.
+ */
+export function parseClientMessage(raw: string): { ok: true; msg: ClientMessage } | { ok: false; code: ErrorCode; message: string } {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { ok: false, code: 'SERVER_ERROR', message: 'Malformed JSON' };
+  }
+
+  if (!isRecord(value)) {
+    return { ok: false, code: 'SERVER_ERROR', message: 'Expected an object' };
+  }
+
+  const type = asString(value['type']);
+  switch (type) {
+    case 'ping': {
+      const t = value['t'];
+      if (typeof t !== 'number') return { ok: false, code: 'SERVER_ERROR', message: 'ping.t must be a number' };
+      return { ok: true, msg: { type: 'ping', t } };
+    }
+    case 'createRoom': {
+      const name = asString(value['name']);
+      const gameType = asString(value['gameType']);
+      if (name === null) return { ok: false, code: 'INVALID_NAME', message: 'name is required' };
+      if (gameType !== 'draw-and-guess') {
+        return { ok: false, code: 'SERVER_ERROR', message: 'unknown gameType' };
+      }
+      return { ok: true, msg: { type: 'createRoom', name, gameType } };
+    }
+    case 'joinRoom': {
+      const code = asString(value['code']);
+      const name = asString(value['name']);
+      const token = asString(value['token']) ?? undefined;
+      if (code === null) return { ok: false, code: 'INVALID_CODE', message: 'code is required' };
+      if (name === null) return { ok: false, code: 'INVALID_NAME', message: 'name is required' };
+      return { ok: true, msg: { type: 'joinRoom', code, name, token } };
+    }
+    case 'leaveRoom': {
+      return { ok: true, msg: { type: 'leaveRoom' } };
+    }
+    default:
+      return { ok: false, code: 'SERVER_ERROR', message: `Unknown message type: ${String(type)}` };
+  }
+}
+
+// --- message handling -------------------------------------------------------
+
+function leaveCurrentRoom(client: Client, reason: 'left' | 'closed' | 'kicked'): void {
+  const { roomCode, playerId } = client;
+  if (!roomCode || !playerId) return;
+
+  client.roomCode = null;
+  client.playerId = null;
+
+  const { room, emptied } = removePlayer(roomCode, playerId);
+  send(client.ws, { type: 'roomLeft', reason });
+
+  if (emptied || !room) {
+    console.log(`[room] ${roomCode} emptied and was deleted`);
+    return;
+  }
+  broadcastRoomState(roomCode);
+  console.log(`[room] ${roomCode} player removed, ${room.players.length} remain`);
 }
 
 function handleMessage(client: Client, raw: string): void {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    console.warn(`[ws] client ${client.id} sent invalid JSON, closing`);
-    client.ws.close(1003, 'invalid JSON');
+  const parsed = parseClientMessage(raw);
+  if (!parsed.ok) {
+    sendError(client.ws, parsed.code, parsed.message);
     return;
   }
 
-  if (!isClientMessage(parsed)) {
-    console.warn(`[ws] client ${client.id} sent unknown message type, ignoring`);
-    return;
-  }
-
-  switch (parsed.type) {
+  const msg = parsed.msg;
+  switch (msg.type) {
     case 'ping': {
-      send(client.ws, {
-        type: 'pong',
-        t: parsed.t,
-        serverTime: Date.now(),
-      });
+      send(client.ws, { type: 'pong', t: msg.t, serverTime: Date.now() });
       break;
     }
+
+    case 'createRoom': {
+      if (client.roomCode) leaveCurrentRoom(client, 'left');
+
+      const result = createRoom(msg.name, msg.gameType, randomUUID());
+      if (!result.ok) {
+        sendError(client.ws, result.code, 'Could not create room');
+        break;
+      }
+
+      const { room, player } = result;
+      client.roomCode = room.code;
+      client.playerId = player.id;
+
+      send(client.ws, {
+        type: 'roomJoined',
+        code: room.code,
+        playerId: player.id,
+        token: player.token,
+        room: toRoomView(room),
+      });
+      console.log(`[room] ${room.code} created by ${player.name}`);
+      break;
+    }
+
+    case 'joinRoom': {
+      if (client.roomCode) leaveCurrentRoom(client, 'left');
+
+      const name = msg.name.slice(0, MAX_NAME_LENGTH);
+      const result = joinRoom(msg.code, name, randomUUID(), msg.token);
+      if (!result.ok) {
+        const message =
+          result.code === 'ROOM_NOT_FOUND'
+            ? `No room with code ${normalizeRoomCode(msg.code)}`
+            : result.code === 'ROOM_FULL'
+              ? 'That room is full'
+              : result.code === 'ROOM_IN_PROGRESS'
+                ? 'That game has already started'
+                : result.code === 'INVALID_NAME'
+                  ? 'Pick a name between 1 and 16 characters'
+                  : 'Could not rejoin that room';
+        sendError(client.ws, result.code, message);
+        break;
+      }
+
+      const { room, player, resumed } = result;
+      client.roomCode = room.code;
+      client.playerId = player.id;
+
+      send(client.ws, {
+        type: 'roomJoined',
+        code: room.code,
+        playerId: player.id,
+        token: player.token,
+        room: toRoomView(room),
+      });
+      broadcastRoomState(room.code);
+      console.log(
+        `[room] ${room.code} ${resumed ? 'resumed' : 'joined'} by ${player.name} (${room.players.length}/${room.players.length})`,
+      );
+      break;
+    }
+
+    case 'leaveRoom': {
+      leaveCurrentRoom(client, 'left');
+      break;
+    }
+
     default: {
-      // Exhaustiveness guard: adding a ClientMessage variant breaks the build here.
-      // The cast is required because `isClientMessage` narrows rather than
-      // exhaustive-filters, so `parsed` is still the full union in this branch.
-      const unreachable = parsed as never;
+      // Exhaustiveness guard; see server/src/ws.ts history for the cast note.
+      const unreachable = msg as never;
       console.warn('[ws] unhandled message', unreachable);
     }
   }
+}
+
+// --- connection lifecycle ---------------------------------------------------
+
+function handleDisconnect(client: Client): void {
+  if (!client.roomCode || !client.playerId) return;
+
+  const { roomCode, playerId } = client;
+
+  // If another socket already claimed this seat (phone and laptop, or a fast
+  // reconnect where the old socket lingered), do not mark the seat offline.
+  const seatStillHeld = roomSockets(roomCode).some(
+    (c) => c !== client && c.playerId === playerId,
+  );
+  if (seatStillHeld) return;
+
+  markDisconnected(roomCode, playerId);
+  broadcastRoomState(roomCode);
 }
 
 export function attachWebSocket(server: Server): WebSocketServer {
@@ -85,16 +270,22 @@ export function attachWebSocket(server: Server): WebSocketServer {
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const client: Client = {
       ws,
-      id: `c${nextId++}`,
+      connId: randomUUID().slice(0, 8),
       alive: true,
+      roomCode: null,
+      playerId: null,
     };
     clients.set(ws, client);
-    console.log(
-      `[ws] connect ${client.id} from ${req.socket.remoteAddress ?? 'unknown'} (total ${clients.size})`,
-    );
+    console.log(`[ws] connect ${client.connId} from ${req.socket.remoteAddress ?? 'unknown'} (total ${clients.size})`);
 
     ws.on('message', (data) => {
-      handleMessage(client, data.toString());
+      try {
+        handleMessage(client, data.toString());
+      } catch (err) {
+        // A handler bug must never take down the server or other rooms.
+        console.error(`[ws] handler error for ${client.connId}:`, err);
+        sendError(ws, 'SERVER_ERROR', 'Something went wrong');
+      }
     });
 
     ws.on('pong', () => {
@@ -103,24 +294,23 @@ export function attachWebSocket(server: Server): WebSocketServer {
 
     ws.on('close', (code, reason) => {
       clients.delete(ws);
-      console.log(
-        `[ws] close ${client.id} code=${code} reason=${reason.toString() || 'none'} (total ${clients.size})`,
-      );
+      handleDisconnect(client);
+      console.log(`[ws] close ${client.connId} code=${code} reason=${reason.toString() || 'none'} (total ${clients.size})`);
     });
 
     ws.on('error', (err) => {
-      console.error(`[ws] error ${client.id}:`, err.message);
+      console.error(`[ws] error ${client.connId}:`, err.message);
     });
 
-    // Greet immediately so the client can measure its first RTT without waiting.
+    // Greet immediately so the client can measure its first RTT.
     send(ws, { type: 'pong', t: 0, serverTime: Date.now() });
   });
 
-  // Detect half-open connections (phone went to sleep, laptop closed lid).
+  // Half-open sockets (phone asleep) never emit 'close'. Ping liveness catches them.
   const heartbeat = setInterval(() => {
     for (const client of clients.values()) {
       if (!client.alive) {
-        console.log(`[ws] heartbeat timeout ${client.id}, terminating`);
+        console.log(`[ws] heartbeat timeout ${client.connId}, terminating`);
         client.ws.terminate();
         continue;
       }
@@ -129,7 +319,19 @@ export function attachWebSocket(server: Server): WebSocketServer {
     }
   }, PING_INTERVAL_MS * 2);
 
-  wss.on('close', () => clearInterval(heartbeat));
+  // Reaper: drop long-gone players, then long-empty rooms.
+  const reaper = setInterval(() => {
+    const expired = reapExpiredPlayers(PLAYER_DISCONNECT_GRACE_MS);
+    for (const { code } of expired) broadcastRoomState(code);
+
+    const removed = reapIdleRooms(ROOM_IDLE_TIMEOUT_MS);
+    for (const code of removed) console.log(`[room] ${code} idle, deleted`);
+  }, 30_000);
+
+  wss.on('close', () => {
+    clearInterval(heartbeat);
+    clearInterval(reaper);
+  });
 
   return wss;
 }

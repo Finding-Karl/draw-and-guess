@@ -1,161 +1,109 @@
-import { useEffect, useRef, useState } from 'react';
-import { PING_INTERVAL_MS, WS_PATH, type ClientMessage, type ServerMessage } from '@dg/shared';
+import { useEffect, useState } from 'react';
+import Home from './Home';
+import Room from './Room';
+import { useSocket } from './socket';
+import { parseRoomParam } from './qr';
 
 /**
- * S01 diagnostic surface.
+ * Routing without a router library.
  *
- * Deliberately ugly and throwaway. It exists to make three things visible:
- * 1. the socket is actually connected through the dev proxy
- * 2. round-trip latency is measurable and stable
- * 3. losing the server is obvious (kill it and watch the status flip)
+ * Three shapes, and that is the whole app:
+ *   /?room=CODE   join flow with the code prefilled (this is what the QR encodes)
+ *   /room/CODE    host screen, lives on the laptop or TV
+ *   /play/CODE    controller, lives on each player's phone
  *
- * This file gets replaced by real routing in S02. Don't style it.
+ * The host and controller screens arrive in S05-S07. For now both room shapes
+ * render the lobby, which is enough to prove joining works from a phone.
  */
 
-type ConnState = 'connecting' | 'online' | 'offline';
+type Route =
+  | { name: 'home'; roomParam: string | null }
+  | { name: 'room'; code: string }
+  | { name: 'play'; code: string };
 
-type Sample = { rtt: number; at: number };
+function parsePath(pathname: string): Route {
+  const roomParam = parseRoomParam(new URLSearchParams(location.search).get('room'));
+  const parts = pathname.split('/').filter(Boolean);
+
+  if (parts.length === 2 && parts[0] === 'room') {
+    return { name: 'room', code: (parts[1] ?? '').toUpperCase() };
+  }
+  if (parts.length === 2 && parts[0] === 'play') {
+    return { name: 'play', code: (parts[1] ?? '').toUpperCase() };
+  }
+  return { name: 'home', roomParam };
+}
 
 export default function App() {
-  const [state, setState] = useState<ConnState>('connecting');
-  const [latency, setLatency] = useState<number | null>(null);
-  const [clockSkew, setClockSkew] = useState<number | null>(null);
-  const [history, setHistory] = useState<Sample[]>([]);
-  const [attempt, setAttempt] = useState(0);
+  const socket = useSocket();
+  const [route, setRoute] = useState<Route>(() => parsePath(location.pathname));
 
-  // Refs avoid re-creating the socket on every state change.
-  const socketRef = useRef<WebSocket | null>(null);
-  const intervalRef = useRef<number | null>(null);
-
+  // Back/forward support without pulling in a router.
   useEffect(() => {
-    let cancelled = false;
-    let retryTimer: number | null = null;
-    let backoff = 500;
-
-    const connect = () => {
-      if (cancelled) return;
-
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${location.host}${WS_PATH}`;
-      setState((prev) => (prev === 'online' ? prev : 'connecting'));
-
-      const ws = new WebSocket(url);
-      socketRef.current = ws;
-
-      ws.onopen = () => {
-        if (cancelled) return;
-        backoff = 500;
-        setState('online');
-        sendPing();
-      };
-
-      ws.onmessage = (event: MessageEvent<string>) => {
-        let msg: ServerMessage;
-        try {
-          msg = JSON.parse(event.data) as ServerMessage;
-        } catch {
-          return;
-        }
-        switch (msg.type) {
-          case 'pong': {
-            // t === 0 is the server's greeting; no RTT to compute.
-            if (msg.t === 0) return;
-            const rtt = Date.now() - msg.t;
-            setLatency(rtt);
-            setHistory((prev) => [...prev.slice(-19), { rtt, at: Date.now() }]);
-            // Rough skew estimate: assume symmetric path, server time is
-            // "now + half the RTT". S04 needs this for timer sync.
-            setClockSkew(msg.serverTime - (msg.t + rtt / 2));
-            break;
-          }
-          default: {
-            // Exhaustiveness guard; see server/src/ws.ts for why the cast is needed.
-            const unreachable = msg as never;
-            console.warn('unhandled server message', unreachable);
-          }
-        }
-      };
-
-      ws.onclose = () => {
-        if (cancelled) return;
-        setState('offline');
-        socketRef.current = null;
-        retryTimer = window.setTimeout(connect, backoff);
-        backoff = Math.min(backoff * 2, 5_000);
-        setAttempt((n) => n + 1);
-      };
-
-      ws.onerror = () => {
-        // onclose handles retry; avoid double-scheduling.
-      };
-    };
-
-    const sendPing = () => {
-      const ws = socketRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const msg: ClientMessage = { type: 'ping', t: Date.now() };
-      ws.send(JSON.stringify(msg));
-    };
-
-    connect();
-    intervalRef.current = window.setInterval(sendPing, PING_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      if (retryTimer !== null) clearTimeout(retryTimer);
-      if (intervalRef.current !== null) clearInterval(intervalRef.current);
-      socketRef.current?.close();
-    };
+    const onPop = () => setRoute(parsePath(location.pathname));
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  const statusColor =
-    state === 'online' ? '#1a7f37' : state === 'connecting' ? '#9a6700' : '#cf222e';
+  const navigate = (path: string) => {
+    if (location.pathname + location.search === path) return;
+    history.pushState(null, '', path);
+    setRoute(parsePath(path));
+  };
 
-  const avg =
-    history.length > 0
-      ? Math.round(history.reduce((sum, s) => sum + s.rtt, 0) / history.length)
-      : null;
+  // If the server says we're in a room but the URL doesn't say so (e.g. the
+  // join happened on `/`), correct the URL so a refresh lands in the right place.
+  useEffect(() => {
+    if (route.name === 'home' && socket.room) {
+      const target = `/play/${socket.room.code}`;
+      history.replaceState(null, '', target);
+      setRoute(parsePath(target));
+    }
+  }, [route.name, socket.room]);
+
+  // Direct navigation to /room/CODE or /play/CODE without a session: attempt
+  // to resume using a stored token, otherwise bounce to the join form.
+  useEffect(() => {
+    if (route.name === 'home' || socket.room) return;
+    if (socket.state === 'offline') return;
+
+    const code = route.code;
+    const storedName = localStorage.getItem('dg:name') ?? '';
+    if (storedName) {
+      socket.joinRoom(code, storedName);
+    } else {
+      navigate(`/?room=${code}`);
+    }
+  }, [route, socket]);
+
+  const leave = () => {
+    socket.leaveRoom();
+    navigate('/');
+  };
+
+  let body: React.ReactNode;
+  if (socket.room && route.name !== 'home') {
+    body = <Room socket={socket} room={socket.room} onLeave={leave} />;
+  } else if (route.name === 'home') {
+    body = (
+      <Home
+        socket={socket}
+        initialCode={route.roomParam ?? undefined}
+        onEnterRoom={(code) => navigate(`/play/${code}`)}
+      />
+    );
+  } else {
+    body = <div className="home">Joining room {route.code}…</div>;
+  }
 
   return (
-    <main>
-      <h1>Draw &amp; Guess — transport check</h1>
-      <p>Session 01 diagnostic. This page is replaced in S02.</p>
-
-      <dl>
-        <dt>Connection</dt>
-        <dd>
-          <strong style={{ color: statusColor }}>{state}</strong>
-          {attempt > 0 && state !== 'online' && ` (reconnect attempt ${attempt})`}
-        </dd>
-
-        <dt>Last RTT</dt>
-        <dd>{latency === null ? '—' : `${latency} ms`}</dd>
-
-        <dt>Average RTT (last {history.length})</dt>
-        <dd>{avg === null ? '—' : `${avg} ms`}</dd>
-
-        <dt>Clock skew vs server</dt>
-        <dd>{clockSkew === null ? '—' : `${clockSkew} ms`}</dd>
-      </dl>
-
-      <h2>Recent samples</h2>
-      <ul>
-        {history
-          .slice()
-          .reverse()
-          .map((s, i) => (
-            <li key={`${s.at}-${i}`}>
-              {new Date(s.at).toLocaleTimeString()} — {s.rtt} ms
-            </li>
-          ))}
-      </ul>
-
-      <hr />
-      <p>
-        <strong>Exit criterion:</strong> the RTT number updates every 5s. Kill the server
-        process — status flips to <em>offline</em>. Restart it — status returns to{' '}
-        <em>online</em> without a page reload.
-      </p>
-    </main>
+    <>
+      {socket.state !== 'online' && (
+        <div className={`conn-bar ${socket.state}`}>
+          {socket.state === 'offline' ? 'Reconnecting…' : 'Connecting…'}
+        </div>
+      )}
+      {body}
+    </>
   );
 }
