@@ -1,0 +1,19 @@
+{
+  "name": "draw-guess",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,magenta \"npm:dev -w @dg/server\" \"npm:dev -w @dg/web\"",
+    "build": "npm run build -w @dg/shared && npm run build -w @dg/server && npm run build -w @dg/web",
+    "typecheck": "npm run typecheck -w @dg/shared && npm run typecheck -w @dg/server && npm run typecheck -w @dg/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.2"
+  }
+}
