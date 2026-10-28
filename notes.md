@@ -118,3 +118,23 @@ that is blocked on having a URL reachable from the phone (S08 deploy).
 **Next session starts with**
 Either S08 (deploy, so the phone test is unblocked) or S04 (round state machine)
 if the phone test is deferred.
+
+**UPDATE — verified on real hardware (2026-10-28, evening)**
+Deployed to Fly.io and opened https://draw-guess.fly.dev/spike on a physical iPhone
+over cellular. Confirmed working by Karl. This closes the project's biggest technical
+risk: finger drawing in mobile Safari works, the canvas does not scroll or zoom, and
+the touch-action/user-select findings documented above hold on real Safari rather
+than only in simulated touch.
+
+Implication for S06: touch drawing is a known quantity now. The fallback plan
+(swap the game for fill-in-the-blank on the same infrastructure) is no longer
+needed for technical reasons.
+
+Deploy notes that will matter again:
+- Fly's trial caps machines at 5 minutes without a payment method on file. Symptom
+  is a clean SIGINT shutdown in the logs with "Trial machine stopping" warnings and
+  a healthy /healthz the whole time. Not a code bug.
+- `fly launch` created a second machine alongside the deployed one. Two machines means
+  two separate in-memory room stores — players would silently end up on different
+  instances and not see each other. Keep exactly one machine until there is a shared
+  store or sticky sessions.
