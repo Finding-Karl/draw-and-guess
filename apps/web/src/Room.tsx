@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { RoomView } from '@dg/shared';
+import type { RoomView, RoundView } from '@dg/shared';
 import type { UseSocket } from './socket';
 import { joinUrl, qrDataUrl } from './qr';
 
@@ -14,6 +14,8 @@ import { joinUrl, qrDataUrl } from './qr';
 type Props = {
   socket: UseSocket;
   room: RoomView;
+  /** Accepted but unused until S07 renders the round on the host screen. */
+  round?: RoundView | null;
   onLeave: () => void;
 };
 

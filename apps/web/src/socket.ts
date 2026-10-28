@@ -2,9 +2,12 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import {
   PING_INTERVAL_MS,
   WS_PATH,
+  type Category,
   type ClientMessage,
   type ErrorMessage,
+  type GuessFeedMessage,
   type RoomView,
+  type RoundView,
   type ServerMessage,
 } from '@dg/shared';
 
@@ -64,12 +67,21 @@ export type UseSocket = {
   state: ConnState;
   latency: number | null;
   room: RoomView | null;
+  round: RoundView | null;
+  /** The drawer's private word. Null for everyone else, always. */
+  drawerView: { answer: string; category: Category } | null;
+  /** Result of this player's last guess, for inline feedback. */
+  lastGuess: { result: 'correct' | 'close' | 'wrong'; text: string } | null;
+  /** Shared guess feed, newest first. */
+  feed: GuessFeedMessage[];
   playerId: string | null;
   error: ErrorMessage | null;
   clearError: () => void;
   createRoom: (name: string) => void;
   joinRoom: (code: string, name: string) => void;
   leaveRoom: () => void;
+  startGame: () => void;
+  submitGuess: (text: string) => void;
   /** Registers a handler for roomJoined; returns an unsubscribe function. */
   onJoined: (fn: (result: JoinResult) => void) => () => void;
 };
@@ -78,6 +90,10 @@ export function useSocket(): UseSocket {
   const [state, setState] = useState<ConnState>('connecting');
   const [latency, setLatency] = useState<number | null>(null);
   const [room, setRoom] = useState<RoomView | null>(null);
+  const [round, setRound] = useState<RoundView | null>(null);
+  const [drawerView, setDrawerView] = useState<{ answer: string; category: Category } | null>(null);
+  const [lastGuess, setLastGuess] = useState<{ result: 'correct' | 'close' | 'wrong'; text: string } | null>(null);
+  const [feed, setFeed] = useState<GuessFeedMessage[]>([]);
   const [playerId, setPlayerId] = useState<string | null>(null);
   const [error, setError] = useState<ErrorMessage | null>(null);
 
@@ -119,9 +135,20 @@ export function useSocket(): UseSocket {
     lastJoinRef.current = null;
     if (room) clearToken(room.code);
     setRoom(null);
+    setRound(null);
+    setDrawerView(null);
+    setLastGuess(null);
+    setFeed([]);
     setPlayerId(null);
     rawSend({ type: 'leaveRoom' });
   }, [rawSend, room]);
+
+  const startGame = useCallback(() => rawSend({ type: 'startGame' }), [rawSend]);
+
+  const submitGuess = useCallback(
+    (text: string) => rawSend({ type: 'guess', text }),
+    [rawSend],
+  );
 
   const onJoined = useCallback((fn: (r: JoinResult) => void) => {
     joinedHandlers.current.add(fn);
@@ -158,7 +185,34 @@ export function useSocket(): UseSocket {
         }
         case 'roomLeft': {
           setRoom(null);
+          setRound(null);
+          setDrawerView(null);
+          setLastGuess(null);
+          setFeed([]);
           setPlayerId(null);
+          break;
+        }
+        case 'roundState': {
+          setRound(msg.round);
+          // The drawer view belongs to the current round only. Clearing it on
+          // phase change prevents a stale word lingering into the next round.
+          if (msg.round.phase !== 'DRAWING' && msg.round.phase !== 'PROMPT_REVEAL') {
+            setDrawerView(null);
+            setLastGuess(null);
+          }
+          if (msg.round.phase === 'PROMPT_REVEAL') setFeed([]);
+          break;
+        }
+        case 'drawerView': {
+          setDrawerView({ answer: msg.answer, category: msg.category });
+          break;
+        }
+        case 'guessResult': {
+          setLastGuess({ result: msg.result, text: msg.text });
+          break;
+        }
+        case 'guessFeed': {
+          setFeed((prev) => [msg, ...prev].slice(0, 20));
           break;
         }
         case 'error': {
@@ -237,12 +291,18 @@ export function useSocket(): UseSocket {
     state,
     latency,
     room,
+    round,
+    drawerView,
+    lastGuess,
+    feed,
     playerId,
     error,
     clearError,
     createRoom,
     joinRoom,
     leaveRoom,
+    startGame,
+    submitGuess,
     onJoined,
   };
 }
