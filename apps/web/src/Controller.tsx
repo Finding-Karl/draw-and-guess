@@ -1,3 +1,6 @@
+import { useEffect, useRef, useState } from 'react';
+import DrawCanvas from './DrawCanvas';
+import SpectatorCanvas from './SpectatorCanvas';
 import type { RoundView, RoomView } from '@dg/shared';
 import type { UseSocket } from './socket';
 
@@ -63,11 +66,11 @@ export default function Controller({ socket, room, round, onLeave }: Props) {
       )}
 
       {phase === 'DRAWING' && r && (
-        <DrawingStub isDrawer={isDrawer} round={r} />
+        <DrawingPhase socket={socket} round={r} isDrawer={isDrawer} />
       )}
 
       {phase === 'ROUND_END' && r && (
-        <RoundEnd round={r} />
+        <RoundEnd round={r} solved={socket.lastGuess?.result === 'correct'} meId={socket.playerId} />
       )}
 
       {phase === 'GAME_END' && r && (
@@ -162,28 +165,172 @@ function PreRound({ isDrawer, drawerName }: { isDrawer: boolean; drawerName: str
   );
 }
 
-function DrawingStub({ isDrawer, round }: { isDrawer: boolean; round: RoundView }) {
+function DrawingPhase({
+  socket,
+  round,
+  isDrawer,
+}: {
+  socket: UseSocket;
+  round: RoundView;
+  isDrawer: boolean;
+}) {
+  const remaining = useRemaining(round.endsAt);
+
+  if (isDrawer) {
+    return (
+      <DrawCanvas
+        socket={socket}
+        remainingMs={remaining}
+        word={socket.drawerView?.answer ?? ''}
+        category={socket.drawerView?.category ?? null}
+      />
+    );
+  }
+
+  return <GuessPanel socket={socket} round={round} remainingMs={remaining} />;
+}
+
+/**
+ * Guess input for non-drawers.
+ *
+ * The keyboard matters here: on iOS the visual viewport shrinks, not
+ * innerHeight, so the feed is kept above the input and the panel is bottom-
+ * anchored rather than centred — otherwise the keyboard eats the history you
+ * need to avoid repeating someone else's guess.
+ */
+function GuessPanel({
+  socket,
+  round,
+  remainingMs,
+}: {
+  socket: UseSocket;
+  round: RoundView;
+  remainingMs: number;
+}) {
+  const [text, setText] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const secondsLeft = Math.ceil(remainingMs / 1000);
+  const urgent = secondsLeft <= 10;
+
+  const solved = socket.lastGuess?.result === 'correct';
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const value = text.trim();
+    if (!value) return;
+    socket.submitGuess(value);
+    setText('');
+  };
+
   return (
-    <section className="ctrl-panel">
-      <p className="eyebrow">{isDrawer ? 'You are drawing' : 'Guess the drawing'}</p>
-      <p className="hint">
-        Drawing UI lands in S06. Phase is {round.phase}
-        {round.hint ? ` · ${round.hint.masked.join(' ')}` : ''}.
-      </p>
-    </section>
+    <div className="guess-wrap">
+      {/* Spectators need to SEE the drawing. Without this the only person who
+          can see the picture is the one holding the drawer's phone. */}
+      <SpectatorCanvas socket={socket} />
+
+      <div className="guess-head">
+        <div className="guess-hint">
+          {round.hint && (
+            <>
+              <span className="draw-cat">{round.hint.category}</span>
+              <span className="masked">{round.hint.masked.join('')}</span>
+            </>
+          )}
+        </div>
+        <span className={urgent ? 'draw-timer urgent' : 'draw-timer'}>{secondsLeft}s</span>
+      </div>
+
+      {solved ? (
+        <div className="guess-solved">Got it! 🎉</div>
+      ) : (
+        <form className="guess-form" onSubmit={submit}>
+          <input
+            ref={inputRef}
+            value={text}
+            onChange={(e) => setText(e.target.value.slice(0, 40))}
+            placeholder="Type your guess…"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            enterKeyHint="send"
+            className={
+              socket.lastGuess?.result === 'close'
+                ? 'guess-input close'
+                : socket.lastGuess?.result === 'wrong'
+                  ? 'guess-input wrong'
+                  : 'guess-input'
+            }
+          />
+          <button type="submit" className="btn primary" disabled={!text.trim()}>
+            Guess
+          </button>
+        </form>
+      )}
+
+      {socket.lastGuess && socket.lastGuess.result !== 'correct' && (
+        <p className={socket.lastGuess.result === 'close' ? 'guess-feedback close' : 'guess-feedback'}>
+          {socket.lastGuess.result === 'close' ? 'SO CLOSE' : 'Not it'}
+        </p>
+      )}
+
+      <ul className="feed">
+        {socket.feed.length === 0 && <li className="feed-empty">No guesses yet.</li>}
+        {socket.feed.map((g, i) => (
+          <li key={`${g.playerId}-${i}`} className={g.result === 'correct' ? 'correct' : ''}>
+            <span className="feed-name">{g.name}</span>
+            <span className="feed-text">{g.result === 'correct' ? 'guessed it!' : g.text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
-function RoundEnd({ round }: { round: RoundView }) {
+/**
+ * Countdown derived from the server's absolute endsAt.
+ *
+ * Never starts a local timer from "80 seconds" — that is how phones end up
+ * disagreeing about when the round finished.
+ */
+function useRemaining(endsAt: number | null): number {
+  const [remaining, setRemaining] = useState(() =>
+    endsAt ? Math.max(0, endsAt - Date.now()) : 0,
+  );
+
+  useEffect(() => {
+    if (!endsAt) return;
+    const id = window.setInterval(() => {
+      setRemaining(Math.max(0, endsAt - Date.now()));
+    }, 200);
+    return () => clearInterval(id);
+  }, [endsAt]);
+
+  return remaining;
+}
+
+function RoundEnd({
+  round,
+  solved,
+  meId,
+}: {
+  round: RoundView;
+  solved: boolean;
+  meId: string | null;
+}) {
   return (
     <section className="ctrl-panel">
+      {solved && <p className="guess-solved">Got it! 🎉</p>}
       <p className="eyebrow">The answer was</p>
       <h2 className="big-handoff">{round.answer ?? '—'}</h2>
       <ol className="scores">
         {round.scores.map((s, i) => (
-          <li key={s.playerId}>
+          <li key={s.playerId} className={s.playerId === meId ? 'me' : undefined}>
             <span className="rank">{i + 1}</span>
-            <span className="player-name">{s.name}</span>
+            <span className="player-name">
+              {s.name}
+              {s.playerId === meId && <em> (you)</em>}
+            </span>
             <span className="score">{s.score}</span>
           </li>
         ))}

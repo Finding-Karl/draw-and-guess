@@ -85,6 +85,8 @@ export type ClientMessage =
   | LeaveRoomRequest
   | StartGameRequest
   | GuessRequest
+  | SendStrokeRequest
+  | UndoStrokeRequest
   | PingMessage;
 
 // ---------------------------------------------------------------------------
@@ -220,6 +222,8 @@ export type UndoStrokeRequest = {
 export type UndoStrokeMessage = {
   type: 'undoStroke';
   playerId: string;
+  /** Which stroke to remove. Without this the client cannot undo exactly one. */
+  strokeId: string;
 };
 
 /**
@@ -271,7 +275,14 @@ export const WS_PATH = '/ws';
 /** Dev fallback port. The server reads PORT from env first. */
 export const DEFAULT_SERVER_PORT = 3001;
 
-export const MAX_PLAYERS = 8;
+/**
+ * Player cap.
+ *
+ * 12 is a product decision, not a technical limit: the host screen has to show
+ * every player's name and score legibly from a sofa, and past ~12 nobody can
+ * read the scoreboard. The in-memory room model itself would hold far more.
+ */
+export const MAX_PLAYERS = 12;
 
 export const MIN_NAME_LENGTH = 1;
 export const MAX_NAME_LENGTH = 16;
@@ -306,10 +317,23 @@ export const PROMPT_REVEAL_MS = 5_000;
 export const ROUND_END_MS = 8_000;
 
 /** Points a correct guesser gets, plus up to this much speed bonus. */
-export const SCORE_BASE = 100;
-export const SCORE_SPEED_BONUS = 100;
-
-/** Points the drawer earns per player who guesses correctly. */
+/**
+ * Scoring.
+ *
+ * First solver: base + speed bonus, scaled by remaining time.
+ * Later solvers: a smaller base plus a smaller speed term, so solving late still
+ *   pays. Previously a second solver earned nothing, which meant the fastest
+ *   player won the round no matter how much skill the rest showed.
+ * Drawer: flat points per solver, so a word everyone eventually gets is
+ *   properly rewarded.
+ *
+ * Percentage-of-time rather than fixed tiers keeps the payouts sane from 2 to 12
+ * players without retuning.
+ */
+export const SCORE_FIRST_BASE = 100;
+export const SCORE_FIRST_BONUS = 100;
+export const SCORE_LATER_BASE = 50;
+export const SCORE_LATER_BONUS = 50;
 export const SCORE_PER_GUESSER = 50;
 
 /**

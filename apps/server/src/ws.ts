@@ -23,6 +23,7 @@ import {
   submitGuess,
   tick,
   toRoundView,
+  type SentStroke,
 } from './round.js';
 import {
   createRoom,
@@ -186,6 +187,45 @@ export function parseClientMessage(raw: string): { ok: true; msg: ClientMessage 
       // Cap input length: guesses are short, and an unbounded string is a DoS.
       return { ok: true, msg: { type: 'guess', text: text.slice(0, 64) } };
     }
+    case 'stroke': {
+      const strokeId = asString(value['strokeId']);
+      const color = asString(value['color']);
+      const width = value['width'];
+      const rawPoints = value['points'];
+      if (strokeId === null || color === null || typeof width !== 'number') {
+        return { ok: false, code: 'SERVER_ERROR', message: 'malformed stroke' };
+      }
+      if (!Array.isArray(rawPoints)) {
+        return { ok: false, code: 'SERVER_ERROR', message: 'stroke.points must be an array' };
+      }
+      // Bounded: a huge stroke is either a bug or an attempt to exhaust memory.
+      const points: Array<{ x: number; y: number }> = [];
+      for (const p of rawPoints.slice(0, 4000)) {
+        if (!isRecord(p)) continue;
+        const x = p['x'];
+        const y = p['y'];
+        if (typeof x !== 'number' || typeof y !== 'number') continue;
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        // Normalised coordinates only: anything outside the canvas is a bug.
+        points.push({ x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) });
+      }
+      if (points.length === 0) {
+        return { ok: false, code: 'SERVER_ERROR', message: 'stroke has no usable points' };
+      }
+      return {
+        ok: true,
+        msg: {
+          type: 'stroke',
+          strokeId: strokeId.slice(0, 64),
+          color: color.slice(0, 16),
+          width,
+          points,
+        },
+      };
+    }
+    case 'undoStroke': {
+      return { ok: true, msg: { type: 'undoStroke' } };
+    }
     default:
       return { ok: false, code: 'SERVER_ERROR', message: `Unknown message type: ${String(type)}` };
   }
@@ -317,6 +357,56 @@ function handleMessage(client: Client, raw: string): void {
       broadcastRoomState(room.code);
       broadcastRound(room.code);
       console.log(`[round] ${room.code} game started`);
+      break;
+    }
+
+    case 'stroke': {
+      if (!client.roomCode || !client.playerId) break;
+      const state = getRound(client.roomCode);
+      if (!state) break;
+
+      // Only the drawer may draw, and only while the round is actually drawing.
+      // Enforced server-side so a modified client cannot scribble over a round.
+      if (state.drawerId !== client.playerId) break;
+      if (state.phase !== 'DRAWING') break;
+
+      const stroke: SentStroke = {
+        playerId: client.playerId,
+        strokeId: msg.strokeId,
+        color: msg.color,
+        width: Math.min(0.08, Math.max(0.002, msg.width)),
+        points: msg.points,
+      };
+      state.strokes.push(stroke);
+
+      // Echo to everyone INCLUDING the drawer; the drawer ignores its own echo
+      // client-side, but the echo is what lets a reconnect rebuild the picture.
+      broadcast(client.roomCode, { type: 'stroke', ...stroke });
+      break;
+    }
+
+    case 'undoStroke': {
+      if (!client.roomCode || !client.playerId) break;
+      const state = getRound(client.roomCode);
+      if (!state) break;
+      if (state.drawerId !== client.playerId) break;
+      if (state.phase !== 'DRAWING') break;
+
+      // Remove this player's most recent stroke server-side, then tell everyone
+      // exactly which stroke went away. Broadcasting a bare "undo" would let
+      // each client remove a different stroke and drift apart.
+      for (let i = state.strokes.length - 1; i >= 0; i -= 1) {
+        const candidate = state.strokes[i];
+        if (candidate && candidate.playerId === client.playerId) {
+          state.strokes.splice(i, 1);
+          broadcast(client.roomCode, {
+            type: 'undoStroke',
+            playerId: client.playerId,
+            strokeId: candidate.strokeId,
+          });
+          break;
+        }
+      }
       break;
     }
 

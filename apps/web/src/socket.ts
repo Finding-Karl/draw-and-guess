@@ -9,6 +9,8 @@ import {
   type RoomView,
   type RoundView,
   type ServerMessage,
+  type StrokeMessage,
+  type UndoStrokeMessage,
 } from '@dg/shared';
 
 /**
@@ -82,8 +84,15 @@ export type UseSocket = {
   leaveRoom: () => void;
   startGame: () => void;
   submitGuess: (text: string) => void;
+  sendStroke: (strokeId: string, color: string, width: number, points: Array<{ x: number; y: number }>) => void;
+  sendUndoStroke: () => void;
   /** Registers a handler for roomJoined; returns an unsubscribe function. */
   onJoined: (fn: (result: JoinResult) => void) => () => void;
+  /** Registers a handler for remote strokes; returns an unsubscribe function. */
+  onStroke: (fn: (msg: StrokeMessage) => void) => () => void;
+  onUndoStroke: (fn: (msg: UndoStrokeMessage) => void) => () => void;
+  /** Fires when a new round begins, so the canvas can clear. */
+  onRoundReset: (fn: () => void) => () => void;
 };
 
 export function useSocket(): UseSocket {
@@ -100,6 +109,11 @@ export function useSocket(): UseSocket {
   const socketRef = useRef<WebSocket | null>(null);
   const queueRef = useRef<string[]>([]);
   const joinedHandlers = useRef(new Set<(r: JoinResult) => void>());
+  const strokeHandlers = useRef(new Set<(msg: StrokeMessage) => void>());
+  const undoHandlers = useRef(new Set<(msg: UndoStrokeMessage) => void>());
+  const roundResetHandlers = useRef(new Set<() => void>());
+  /** Tracks the last round index seen, so a new round clears the canvas once. */
+  const roundRef = useRef<number>(-1);
   /** Last join intent, replayed on reconnect so a blip doesn't eject the user. */
   const lastJoinRef = useRef<{ code: string; name: string } | null>(null);
 
@@ -150,6 +164,36 @@ export function useSocket(): UseSocket {
     [rawSend],
   );
 
+  const sendStroke = useCallback(
+    (strokeId: string, color: string, width: number, points: Array<{ x: number; y: number }>) => {
+      rawSend({ type: 'stroke', strokeId, color, width, points });
+    },
+    [rawSend],
+  );
+
+  const sendUndoStroke = useCallback(() => rawSend({ type: 'undoStroke' }), [rawSend]);
+
+  /** Generic subscribe helper so each event type gets the same unsubscribe shape. */
+  function subscribe<T>(set: Set<(v: T) => void>, fn: (v: T) => void): () => void {
+    set.add(fn);
+    return () => {
+      set.delete(fn);
+    };
+  }
+
+  const onStroke = useCallback(
+    (fn: (msg: StrokeMessage) => void) => subscribe(strokeHandlers.current, fn),
+    [],
+  );
+  const onUndoStroke = useCallback(
+    (fn: (msg: UndoStrokeMessage) => void) => subscribe(undoHandlers.current, fn),
+    [],
+  );
+  const onRoundReset = useCallback(
+    (fn: () => void) => subscribe(roundResetHandlers.current, fn),
+    [],
+  );
+
   const onJoined = useCallback((fn: (r: JoinResult) => void) => {
     joinedHandlers.current.add(fn);
     return () => {
@@ -193,14 +237,27 @@ export function useSocket(): UseSocket {
           break;
         }
         case 'roundState': {
+          // A new round starts in PROMPT_REVEAL; clear the canvas then, not on
+          // every state message, or strokes vanish mid-drawing.
+          if (msg.round.phase === 'PROMPT_REVEAL' && msg.round.roundIndex !== roundRef.current) {
+            roundRef.current = msg.round.roundIndex;
+            for (const fn of roundResetHandlers.current) fn();
+          }
           setRound(msg.round);
           // The drawer view belongs to the current round only. Clearing it on
           // phase change prevents a stale word lingering into the next round.
+          //
+          // lastGuess is NOT cleared here on purpose: a correct guess immediately
+          // transitions the round to ROUND_END, so clearing on that transition
+          // would wipe the confirmation before the player ever sees it. It is
+          // cleared when the next round begins instead.
           if (msg.round.phase !== 'DRAWING' && msg.round.phase !== 'PROMPT_REVEAL') {
             setDrawerView(null);
+          }
+          if (msg.round.phase === 'PROMPT_REVEAL') {
+            setFeed([]);
             setLastGuess(null);
           }
-          if (msg.round.phase === 'PROMPT_REVEAL') setFeed([]);
           break;
         }
         case 'drawerView': {
@@ -213,6 +270,14 @@ export function useSocket(): UseSocket {
         }
         case 'guessFeed': {
           setFeed((prev) => [msg, ...prev].slice(0, 20));
+          break;
+        }
+        case 'stroke': {
+          for (const fn of strokeHandlers.current) fn(msg);
+          break;
+        }
+        case 'undoStroke': {
+          for (const fn of undoHandlers.current) fn(msg);
           break;
         }
         case 'error': {
@@ -303,6 +368,11 @@ export function useSocket(): UseSocket {
     leaveRoom,
     startGame,
     submitGuess,
+    sendStroke,
+    sendUndoStroke,
+    onStroke,
+    onUndoStroke,
+    onRoundReset,
     onJoined,
   };
 }
