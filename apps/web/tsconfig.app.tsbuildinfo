@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/home.tsx","./src/room.tsx","./src/spikedraw.tsx","./src/main.tsx","./src/qr.ts","./src/socket.ts"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/controller.tsx","./src/home.tsx","./src/room.tsx","./src/spikedraw.tsx","./src/main.tsx","./src/qr.ts","./src/socket.ts"],"version":"5.9.3"}

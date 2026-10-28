@@ -202,3 +202,57 @@ also unbuilt.
 
 **Next session starts with**
 S05: controller lobby, ready-up, and the pre-round screens.
+
+---
+
+## S05 — Controller lobby + pre-round handoff
+Date: 2026-10-28
+
+**What I built**
+A phone-first `Controller` component at `/play/:code` with a phase switch:
+lobby (player list, host start button gated at 2+ players), PROMPT_REVEAL
+handoff ("You're drawing / Get ready" vs. "X is drawing"), DRAWING stub,
+ROUND_END answer + scores, GAME_END winner + final table.
+
+`socket.ts` now holds the full server state: `round`, `drawerView`, `lastGuess`,
+and a 20-entry `feed`. The drawer's word is cleared whenever the phase leaves
+DRAWING/PROMPT_REVEAL, so a stale word can't leak into the next round.
+
+**Decisions + why**
+- **Controller is a separate component from the host screen**, not a responsive
+  variant. Two different devices, two different jobs: the phone is a private
+  input surface, the TV is a public display. That split is the product.
+- **Start is gated client-side at 2 players** *and* server-side (`TOO_FEW_PLAYERS`).
+  The client gate is UX; the server gate is the actual rule.
+- **Leave now clears the stored token.** Previously a reload after leaving would
+  silently resume the seat you just gave up.
+
+**Two bugs the screenshots caught that the tests did not**
+1. **The controller had no CSS at all.** I wrote the component but never added
+   its styles, so everything sat flush against the top-left with "Leave" touching
+   the room code. My Playwright test asserted elements *existed* and passed 12/12
+   while the page looked broken. Lesson: a passing DOM test says nothing about
+   layout. Look at the screenshot every time a new screen appears.
+2. **The footer spans ran together** — "— msRound 1/3 · 0 pts" — because two
+   spans in a flex row had no separation.
+
+**Type errors that `vite build` hid**
+`npm run build` is `tsc -b && vite build`; the vite step succeeded while `tsc -b`
+failed, and the npm script only surfaced the workspace path, not the actual
+errors. Running `npx tsc -b` inside `apps/web` showed them plainly. Missing type
+imports (`RoundView`, `Category`, `GuessFeedMessage`) plus null-narrowing on
+`round` in the phase branches. Fixed with a single `const r = round` narrowing
+and `&& r` guards.
+
+**Verified — 12/12 browser checks**
+Host alone sees a disabled start button and the 2-player hint. Phone joins as a
+non-host with no start button. After the second player joins, start enables.
+Pressing it moves both clients out of the lobby, exactly one player is told
+they're drawing, and the other is told who is. No page errors.
+
+**Still missing**
+Drawing and guessing inputs (S06), everything on the big screen (S07).
+
+**Next session starts with**
+S06: wire the canvas into the controller for the drawer, guess input + feed for
+everyone else.

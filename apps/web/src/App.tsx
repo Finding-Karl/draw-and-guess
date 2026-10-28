@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import Home from './Home';
 import Room from './Room';
+import Controller from './Controller';
 import SpikeDraw from './SpikeDraw';
 import { useSocket } from './socket';
 import { parseRoomParam } from './qr';
@@ -96,8 +97,17 @@ export default function App() {
   }
 
   let body: React.ReactNode;
-  if (socket.room && route.name !== 'home') {
-    body = <Room socket={socket} room={socket.room} onLeave={leave} />;
+  if (socket.room && route.name === 'play') {
+    body = (
+      <Controller
+        socket={socket}
+        room={socket.room}
+        round={socket.round}
+        onLeave={leave}
+      />
+    );
+  } else if (socket.room && route.name !== 'home') {
+    body = <Room socket={socket} room={socket.room} round={socket.round} onLeave={leave} />;
   } else if (route.name === 'home') {
     body = (
       <Home
