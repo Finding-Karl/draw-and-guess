@@ -52,3 +52,4 @@ apps/server/src/ws.ts      ws transport: connections, ping/pong, heartbeat
 apps/web/src/App.tsx       S01 diagnostic UI (replaced in S02)
 packages/shared/src/index.ts  wire protocol
 ```
+# draw-and-guess
