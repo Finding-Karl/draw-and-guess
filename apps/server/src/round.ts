@@ -5,9 +5,11 @@ import {
   PROMPT_REVEAL_MS,
   ROUNDS_PER_GAME,
   ROUND_END_MS,
-  SCORE_BASE,
+  SCORE_FIRST_BASE,
+  SCORE_FIRST_BONUS,
+  SCORE_LATER_BASE,
+  SCORE_LATER_BONUS,
   SCORE_PER_GUESSER,
-  SCORE_SPEED_BONUS,
   editDistance,
   maskAnswer,
   normalizeGuess,
@@ -37,6 +39,14 @@ export type RoundPlayer = {
   score: number;
 };
 
+export type SentStroke = {
+  playerId: string;
+  strokeId: string;
+  color: string;
+  width: number;
+  points: Array<{ x: number; y: number }>;
+};
+
 export type RoundState = {
   phase: Phase;
   roundIndex: number;
@@ -51,6 +61,12 @@ export type RoundState = {
   /** Player ids who already guessed correctly this round. */
   solvers: Set<string>;
   scores: Map<string, number>;
+  /**
+   * Strokes drawn this round, in arrival order. Kept server-side so a player
+   * who reconnects mid-round can be sent the current picture instead of an
+   * empty canvas. Cleared when a new round begins.
+   */
+  strokes: SentStroke[];
   /** Set once GAME_END is reached. */
   finishedAt: number | null;
 };
@@ -124,6 +140,7 @@ export function startGame(room: Room): StartResult {
     used: new Set(),
     solvers: new Set(),
     scores: new Map(room.players.map((p) => [p.id, 0])),
+    strokes: [],
     finishedAt: null,
   };
   rounds.set(room.code, state);
@@ -137,6 +154,7 @@ export function startGame(room: Room): StartResult {
 export function beginRound(room: Room, state: RoundState): void {
   state.roundIndex += 1;
   state.solvers.clear();
+  state.strokes = [];
   state.answer = null;
   state.hint = null;
   state.category = null;
@@ -178,7 +196,7 @@ function endGame(state: RoundState): void {
 }
 
 export type GuessOutcome =
-  | { kind: 'correct'; scoreDelta: number }
+  | { kind: 'correct'; scoreDelta: number; position: number }
   | { kind: 'close' }
   | { kind: 'wrong' }
   | { kind: 'ignored'; reason: 'not-drawing' | 'drawer' | 'already-solved' | 'empty' };
@@ -203,12 +221,17 @@ export function submitGuess(
   const answer = normalizeGuess(state.answer);
 
   if (guess === answer) {
+    // Position decides the payout. Order matters, but solving always pays:
+    // a second or third solver still earns something, just less than the first.
+    const position = state.solvers.size; // 0-based: 0 means this is the first
     state.solvers.add(playerId);
 
-    // Speed bonus scales with time remaining, so a fast guess is worth more.
     const remaining = state.endsAt ? Math.max(0, state.endsAt - Date.now()) : 0;
-    const speed = Math.round((remaining / DRAWING_MS) * SCORE_SPEED_BONUS);
-    const gained = SCORE_BASE + speed;
+    const fraction = Math.max(0, Math.min(1, remaining / DRAWING_MS));
+
+    const base = position === 0 ? SCORE_FIRST_BASE : SCORE_LATER_BASE;
+    const bonusCap = position === 0 ? SCORE_FIRST_BONUS : SCORE_LATER_BONUS;
+    const gained = Math.round(base + fraction * bonusCap);
 
     state.scores.set(playerId, (state.scores.get(playerId) ?? 0) + gained);
     if (state.drawerId) {
@@ -218,7 +241,7 @@ export function submitGuess(
       );
     }
 
-    return { kind: 'correct', scoreDelta: gained };
+    return { kind: 'correct', scoreDelta: gained, position };
   }
 
   if (editDistance(guess, answer) <= CLOSE_EDIT_DISTANCE) return { kind: 'close' };
@@ -272,8 +295,7 @@ export function tick(room: Room, state: RoundState, now: number): TickEvent[] {
   return events;
 }
 
-/** Removes a player's round participation when they leave for good. */
-export function forgetPlayer(code: string, playerId: string): void {
+/** Removes a player's round participation when they leave for good. */export function forgetPlayer(code: string, playerId: string): void {
   const state = rounds.get(code);
   if (!state) return;
   state.scores.delete(playerId);

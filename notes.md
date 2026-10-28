@@ -256,3 +256,78 @@ Drawing and guessing inputs (S06), everything on the big screen (S07).
 **Next session starts with**
 S06: wire the canvas into the controller for the drawer, guess input + feed for
 everyone else.
+
+---
+
+## S06 — Drawing and guessing
+Date: 2026-10-28
+
+**What I built**
+`DrawCanvas` for the drawer and `GuessPanel` for everyone else, both on the phone
+controller. Strokes relay through the server; guesses validate server-side; the
+round-end screen confirms a solve.
+
+**Decisions + why**
+- **Normalised 0..1 coordinates, not pixels.** The drawer's phone and the host
+  screen have different sizes and aspect ratios. Pixels would put the stroke in
+  the wrong place on every device except the one that drew it.
+- **Strokes emit on pointerup, not per move.** One message per frame would be
+  ~50x the traffic for data the server cannot use until the line is finished.
+- **Server owns undo.** It removes the drawer's latest stroke and broadcasts that
+  exact strokeId. A bare "undo" would let each client remove a different stroke
+  and drift apart.
+- **Server enforces drawer-only drawing and drawing-only-during-DRAWING.** A
+  modified client should not be able to scribble over a round or draw after time.
+- **Server keeps the round's strokes.** Cheap now, and it is what lets a
+  reconnecting player be sent the picture instead of a blank canvas.
+
+**Scoring changed after user feedback**
+Original: first solver 100 + up to 100 speed; every later solver got 0. That
+meant the second person to solve — who did solve it — was scored as if they had
+failed. New model:
+  first solver: 100 + up to 100 × remaining-time fraction  → 100–200
+  later solvers: 50 + up to 50 × remaining-time fraction  → 50–100
+  drawer: 50 per solver (unchanged)
+Verified across a 12-player round: 200, 90, 80, 73, 65, 60, 55, 53, 51, 51, 50.
+Percentage-of-time rather than fixed tiers is what keeps this sane from 2 to 12
+players without retuning.
+
+**MAX_PLAYERS raised 8 → 12.** A product decision, not a technical limit: the
+host screen must show every name and score legibly from a sofa, and past ~12
+nobody can read the scoreboard. Documented on the constant.
+
+**Bugs found and fixed**
+1. **The correct-guess confirmation never appeared.** The server ends the round
+   in the same tick as a correct guess, so the panel holding the confirmation was
+   torn down instantly. A player who guessed right went straight to the
+   scoreboard with no sign their guess landed. Now shown on the round-end screen.
+   I first "fixed" this by not clearing `lastGuess`, which was the wrong layer —
+   the debug trace showed the UI was already on ROUND_END at t+50ms, so no
+   amount of client state retention could have helped. Lesson: sample the DOM
+   over time before theorising about which state is being cleared.
+2. **`UndoStrokeMessage` had no `strokeId`**, so clients could not remove a
+   specific stroke and would have drifted out of sync. Added.
+3. **Client message union was missing `stroke` / `undoStroke`**, so the client
+   could not legally send them even though the server parsed them. TypeScript
+   caught this only because `ClientMessage` is a closed union.
+
+**Test assertion that was itself wrong**
+"feed marks the correct guess" failed repeatedly. The feed lives inside the
+drawing phase, which is destroyed the moment a correct guess ends the round — so
+the correct guess is never observable in the feed afterwards, by design. The
+assertion was testing a screen that cannot exist. Replaced rather than
+weakened, with a comment explaining why.
+
+**Verified — 13/13 browser checks**
+Drawer gets canvas + word + category. Guesser gets a masked hint and no canvas
+(the answer is not on their device). Stroke records. Wrong guess shows "Not it".
+Correct guess shows the solved state and ends the round. Round-end reveals the
+answer. No page errors.
+
+**Still missing**
+Everything on the big screen (S07) — right now non-drawers see only the masked
+hint, not the drawing. Solo mode, analytics, the visual design pass.
+
+**Next session starts with**
+S07: the host screen. Canvas rendering for spectators, round timer, guess feed,
+scoreboard.
