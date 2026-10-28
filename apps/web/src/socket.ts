@@ -33,6 +33,8 @@ export type JoinResult = {
   code: string;
   playerId: string;
   token: string;
+  /** True when this client created the room, so it belongs on the host screen. */
+  isHost: boolean;
   room: RoomView;
 };
 
@@ -219,7 +221,16 @@ export function useSocket(): UseSocket {
           setPlayerId(msg.playerId);
           setError(null);
           for (const fn of joinedHandlers.current) {
-            fn({ code: msg.code, playerId: msg.playerId, token: msg.token, room: msg.room });
+            // Trust the server's flag. Deriving it from room.players would be
+            // wrong: a host is a display with no seat, so the lookup misses and
+            // the display would be misrouted to the phone controller.
+            fn({
+              code: msg.code,
+              playerId: msg.playerId,
+              token: msg.token,
+              room: msg.room,
+              isHost: msg.isHost,
+            });
           }
           break;
         }

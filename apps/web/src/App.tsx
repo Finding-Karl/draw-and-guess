@@ -113,7 +113,7 @@ export default function App() {
       <Home
         socket={socket}
         initialCode={route.roomParam ?? undefined}
-        onEnterRoom={(code) => navigate(`/play/${code}`)}
+        onEnterRoom={(code, isHost) => navigate(isHost ? `/room/${code}` : `/play/${code}`)}
       />
     );
   } else {

@@ -105,9 +105,15 @@ export function toRoundView(room: Room, state: RoundState) {
   };
 }
 
-/** Picks the next drawer: rotation order, skipping disconnected players. */
+/**
+ * Picks the next drawer: rotation order over PHONES only.
+ *
+ * The host is a display and has no seat, so it can never be selected here.
+ * `room.players` already excludes the host; this filter makes the intent
+ * explicit and guards against a future refactor reintroducing one.
+ */
 function nextDrawer(room: Room, state: RoundState): StoredPlayer | null {
-  const connected = room.players.filter((p) => p.connected);
+  const connected = room.players.filter((p) => p.connected && !p.isHost);
   if (connected.length < 2) return null;
 
   if (!state.drawerId) return connected[0] ?? null;
@@ -126,7 +132,8 @@ export type StartResult = { ok: true } | { ok: false; code: 'TOO_FEW_PLAYERS' | 
 export function startGame(room: Room): StartResult {
   if (room.inProgress) return { ok: false, code: 'WRONG_PHASE' };
 
-  const connected = room.players.filter((p) => p.connected);
+  // The host is not a player: two PHONES are needed before a round can start.
+  const connected = room.players.filter((p) => p.connected && !p.isHost);
   if (connected.length < 2) return { ok: false, code: 'TOO_FEW_PLAYERS' };
 
   const state: RoundState = {

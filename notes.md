@@ -331,3 +331,63 @@ hint, not the drawing. Solo mode, analytics, the visual design pass.
 **Next session starts with**
 S07: the host screen. Canvas rendering for spectators, round timer, guess feed,
 scoreboard.
+
+---
+
+## S07 — Host screen, host-as-display
+Date: 2026-10-28
+
+**Product model (decided by Karl)**
+The host is a **display, not a player**. The game is a medium for people to
+connect phones to, watched on a laptop or TV either directly or via screenshare.
+The host has no seat: it never draws, never scores, and never appears in the
+player list. **Two phones are the minimum to play.** (Solo testing is what S14's
+bot mode is for.)
+
+The display owns **Start**, because whoever sets up the laptop is standing at it,
+and it means no phone needs to be designated the starter — which keeps
+screenshare setups working with zero coordination.
+
+**What I built**
+A dedicated big-screen `Room` component: QR + player roster in the lobby, then a
+dominant canvas with drawer name, letter slots and a distance-legible timer
+during play, a public guess feed, and round-end/final scoreboards.
+
+**Server changes**
+`Room.host: HostSession` is now separate from `players`. `createRoom` produces a
+display with no seat. `nextDrawer` and `startGame` filter to non-host connected
+players. Host migration on player-leave is gone (nobody to promote). Idle-room
+reaping now counts the display as a live connection.
+
+**Two bugs, both the same root cause**
+1. **Start did nothing.** `startGame` authenticated by looking the connection's
+   playerId up in `room.players` and requiring `isHost` — impossible for a host
+   with no seat, so it always returned NOT_HOST. Fixed to compare
+   `room.host.id === client.hostId`.
+2. **Display was routed to the phone controller.** The client derived `isHost`
+   from `room.players` too, which missed for the same reason. Now the server
+   sends `isHost` on `roomJoined` and the client trusts it.
+
+Lesson worth keeping: when an entity moves out of a collection, every lookup
+that found it there is now a silent false. Both bugs were `find(...)` returning
+undefined and defaulting to false rather than throwing.
+
+**Verified — 13/13 browser checks**
+Host on /room route and absent from the roster. Start gated at 2 phones. Start
+works from the display. A phone (never the host) is the drawer. Host has no draw
+canvas. Host canvas receives live strokes (0 → 22938 ink px). Guesses appear on
+the public feed. Timer computed at 48px. Host name absent from scores. No errors.
+
+**My own test bugs (all the same shape)**
+Three assertions failed because they hardcoded roles: assuming a specific phone
+was the guesser when it was the drawer, and counting the "No phones joined yet"
+placeholder as a player row. Pattern: tests should read roles from the page, not
+assume the join order determines them.
+
+**Still missing**
+Mid-game rejoin (an explicit Leave clears the token and in-progress joins are
+refused, so a dead phone locks a player out). Solo/bot mode, analytics, the
+visual design pass (S15-S18).
+
+**Next session starts with**
+S08/S11 territory: let a disconnected player reclaim their seat mid-game.

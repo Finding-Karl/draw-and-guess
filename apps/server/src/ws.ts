@@ -57,6 +57,8 @@ type Client = {
   /** Set once the connection is bound to a seat. */
   roomCode: string | null;
   playerId: string | null;
+  /** Set instead of playerId when this connection is the room's display. */
+  hostId?: string;
 };
 
 const clients = new Map<WebSocket, Client>();
@@ -274,18 +276,22 @@ function handleMessage(client: Client, raw: string): void {
         break;
       }
 
-      const { room, player } = result;
+      const { room, host } = result;
       client.roomCode = room.code;
-      client.playerId = player.id;
+      // The creator is the DISPLAY, not a player. playerId is left null so
+      // nothing downstream can mistake the host for a participant.
+      client.playerId = null;
+      client.hostId = host.id;
 
       send(client.ws, {
         type: 'roomJoined',
         code: room.code,
-        playerId: player.id,
-        token: player.token,
+        playerId: host.id,
+        token: host.token,
         room: toRoomView(room),
+        isHost: true,
       });
-      console.log(`[room] ${room.code} created by ${player.name}`);
+      console.log(`[room] ${room.code} display created`);
       break;
     }
 
@@ -312,6 +318,7 @@ function handleMessage(client: Client, raw: string): void {
       const { room, player, resumed } = result;
       client.roomCode = room.code;
       client.playerId = player.id;
+      client.hostId = undefined;
 
       send(client.ws, {
         type: 'roomJoined',
@@ -319,6 +326,7 @@ function handleMessage(client: Client, raw: string): void {
         playerId: player.id,
         token: player.token,
         room: toRoomView(room),
+        isHost: false,
       });
       broadcastRoomState(room.code);
       console.log(
@@ -338,9 +346,13 @@ function handleMessage(client: Client, raw: string): void {
         sendError(client.ws, 'ROOM_NOT_FOUND', 'You are not in a room');
         break;
       }
-      const me = room.players.find((p) => p.id === client.playerId);
-      if (!me?.isHost) {
-        sendError(client.ws, 'NOT_HOST', 'Only the host can start the game');
+
+      // The display owns Start. The host has no seat in room.players, so it must
+      // be authenticated against the room's host session, not the player list.
+      // Looking it up as a player always failed and returned NOT_HOST.
+      const isHostConn = client.hostId !== undefined && room.host?.id === client.hostId;
+      if (!isHostConn) {
+        sendError(client.ws, 'NOT_HOST', 'Only the room display can start the game');
         break;
       }
 

@@ -14,7 +14,7 @@ type Props = {
   socket: UseSocket;
   /** Prefilled from a QR link (?room=ABCD). */
   initialCode?: string;
-  onEnterRoom: (code: string) => void;
+  onEnterRoom: (code: string, isHost: boolean) => void;
 };
 
 export default function Home({ socket, initialCode, onEnterRoom }: Props) {
@@ -34,8 +34,14 @@ export default function Home({ socket, initialCode, onEnterRoom }: Props) {
   }, [name]);
 
   // Navigate once the server confirms membership.
+  //
+  // Creating a room belongs on the big screen (/room/:code); joining belongs on
+  // the phone controller (/play/:code). Both players and host reach the same
+  // server state; only the surface differs.
   useEffect(() => {
-    return socket.onJoined((result) => onEnterRoom(result.code));
+    return socket.onJoined((result) => {
+      onEnterRoom(result.code, result.isHost);
+    });
   }, [socket, onEnterRoom]);
 
   const nameOk = isValidName(name);

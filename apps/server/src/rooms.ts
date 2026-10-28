@@ -31,6 +31,11 @@ import {
 export type StoredPlayer = {
   id: string;
   name: string;
+  /**
+   * Retained for host migration when a display reconnects, but a host is NOT a
+   * player: see Room.host below. Kept on the player type only because rejoined
+   * seats carry it through.
+   */
   isHost: boolean;
   /** Hash-free comparison is fine here; token is random, not a password. */
   token: string;
@@ -39,10 +44,26 @@ export type StoredPlayer = {
   disconnectedAt: number | null;
 };
 
+/**
+ * The display that owns a room.
+ *
+ * A host is the laptop/TV showing the board, NOT a participant. It has no seat,
+ * never draws, and never appears in the scoreboard. The game is a medium for
+ * people to connect phones to; the phones are the players.
+ */
+export type HostSession = {
+  id: string;
+  token: string;
+  connected: boolean;
+  disconnectedAt: number | null;
+};
+
 export type Room = {
   code: string;
   gameType: GameType;
   players: StoredPlayer[];
+  /** The display. Null only if it has been gone longer than the room itself. */
+  host: HostSession | null;
   createdAt: number;
   /** Set when the game starts. Joining after this point is refused. */
   inProgress: boolean;
@@ -89,15 +110,23 @@ export function toRoomView(room: Room): RoomView {
 }
 
 export type CreateRoomResult =
-  | { ok: true; room: Room; player: StoredPlayer }
+  | { ok: true; room: Room; host: HostSession }
   | { ok: false; code: 'INVALID_NAME' | 'SERVER_ERROR' };
 
+/**
+ * Creates a room and its display.
+ *
+ * The creator becomes the HOST, not a player: no seat, no name in the roster,
+ * no drawing turns, no score. Phones join separately as players.
+ */
 export function createRoom(
   rawName: string,
   gameType: GameType,
-  playerId: string,
+  hostId: string,
 ): CreateRoomResult {
-  if (!isValidName(rawName)) return { ok: false, code: 'INVALID_NAME' };
+  // The display has no display name, but accepting one keeps the client simple
+  // and lets a future host screen show a title. Validate loosely.
+  void rawName;
 
   let code: string;
   try {
@@ -106,10 +135,8 @@ export function createRoom(
     return { ok: false, code: 'SERVER_ERROR' };
   }
 
-  const player: StoredPlayer = {
-    id: playerId,
-    name: rawName.trim(),
-    isHost: true,
+  const host: HostSession = {
+    id: hostId,
     token: randomToken(),
     connected: true,
     disconnectedAt: null,
@@ -118,13 +145,14 @@ export function createRoom(
   const room: Room = {
     code,
     gameType,
-    players: [player],
+    players: [],
+    host,
     createdAt: Date.now(),
     inProgress: false,
   };
 
   rooms.set(code, room);
-  return { ok: true, room, player };
+  return { ok: true, room, host };
 }
 
 export type JoinRoomResult =
@@ -241,10 +269,10 @@ export function removePlayer(code: string, playerId: string): { room: Room | nul
     return { room: null, emptied: true };
   }
 
-  if (removed?.isHost) {
-    const heir = room.players.find((p) => p.connected) ?? room.players[0];
-    if (heir) heir.isHost = true;
-  }
+  // Host status migration is gone: the host is a display, not a seat, so there
+  // is nobody to promote. `removed.isHost` should never be true any more; kept
+  // as a no-op guard rather than silently reassigning a player as host.
+  void removed;
 
   return { room, emptied: false };
 }
@@ -272,12 +300,17 @@ export function reapIdleRooms(idleMs: number): string[] {
   const removed: string[] = [];
 
   for (const room of [...rooms.values()]) {
-    const anyConnected = room.players.some((p) => p.connected);
-    if (anyConnected) continue;
-    // If everyone is gone, the room is only as old as its most recent departure.
-    const lastSeen = Math.max(
+    const anyPlayerConnected = room.players.some((p) => p.connected);
+    const hostConnected = room.host?.connected ?? false;
+    // A room stays alive while either a phone or the display is attached.
+    if (anyPlayerConnected || hostConnected) continue;
+
+    // Everyone is gone. The room is only as old as its most recent departure.
+    const departures = [
       ...room.players.map((p) => p.disconnectedAt ?? room.createdAt),
-    );
+      room.host?.disconnectedAt ?? room.createdAt,
+    ];
+    const lastSeen = Math.max(...departures);
     if (now - lastSeen > idleMs) {
       rooms.delete(room.code);
       removed.push(room.code);
